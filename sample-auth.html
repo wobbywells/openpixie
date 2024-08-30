@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenRouter Auth</title>
+</head>
+<body>
+  <script>
+    function generateRandomString(length) {
+      const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+      let randomString = '';
+      const array = new Uint8Array(length);
+      window.crypto.getRandomValues(array);
+      for (let i = 0; i < length; i++) {
+        randomString += charset[array[i] % charset.length];
+      }
+      return randomString;
+    }
+
+    async function sha256CodeChallenge(input) {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(input);
+      const hash = await crypto.subtle.digest('SHA-256', data);
+      return btoa(String.fromCharCode.apply(null, new Uint8Array(hash)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    (async () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const authCode = urlParams.get('code');
+      let codeVerifier = localStorage.getItem('code_verifier');
+
+      if (!authCode) {
+        codeVerifier = generateRandomString(128);
+        localStorage.setItem('code_verifier', codeVerifier);
+        const callbackUrl = window.location.origin + window.location.pathname;
+        const codeChallenge = await sha256CodeChallenge(codeVerifier);
+        const authUrl = `https://openrouter.ai/auth?callback_url=${encodeURIComponent(callbackUrl)}&code_challenge=${codeChallenge}&code_challenge_method=S256`;
+        window.location.href = authUrl;
+      } else {
+        fetch('https://openrouter.ai/api/v1/auth/keys', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            code: authCode,
+            code_verifier: codeVerifier,
+            code_challenge_method: 'S256'
+          })
+        })
+        .then(response => response.json())
+        .then(data => {
+          alert('Success: ' + JSON.stringify(data));
+          localStorage.removeItem('code_verifier');
+        })
+        .catch((error) => {
+          alert('Error: ' + error);
+          localStorage.removeItem('code_verifier');
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
