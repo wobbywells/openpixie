@@ -23,30 +23,44 @@
 </head>
 <body>
   <button id="connectButton">Connect to OpenRouter</button>
+  <button id="clearChatButton">Clear Chat</button>
   <div id="chatBox"></div>
   <input type="text" id="userInput" placeholder="Type a message...">
   <button id="sendButton">Send</button>
 
   <script>
-  // 
-  //const api_key = ''// api key here
-  document.getElementById('connectButton').addEventListener('click', async () => {
-      const api_key = await checkAuthFlow();
-      sessionStorage.setItem('api_key');
-    });
-    
+    function generateRandomString(length) {
+      const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+      let randomString = '';
+      const array = new Uint8Array(length);
+      window.crypto.getRandomValues(array);
+      for (let i = 0; i < length; i++) {
+        randomString += charset[array[i] % charset.length];
+      }
+      return randomString;
+    }
+
+    async function sha256CodeChallenge(input) {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(input);
+      const hash = await crypto.subtle.digest('SHA-256', data);
+      return btoa(String.fromCharCode.apply(null, new Uint8Array(hash)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
     async function sendChatCompletion(apiKey, messages) {
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${apiKey}`,
-          "HTTP-Referer": `https://versabot.ai/pixie`, // Optional, for including your app on openrouter.ai rankings.
-          "X-Title": `OpenPixie`, // Optional. Shows in rankings on openrouter.ai.
+          "HTTP-Referer": `https://versabot.ai/pixie`,
+          "X-Title": `OpenPixie`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          "model": "openai/gpt-4o",
+          "model": "openai/gpt-4",
           "messages": messages,
+          "stream": true
         })
       });
 
@@ -54,20 +68,64 @@
         throw new Error('Network response was not ok');
       }
 
-      const chatData = await response.json();
-      return chatData.choices[0].message.content;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let chatData = '';
+      let fullResponse = '';
+
+      document.getElementById('chatBox').innerHTML += `<p><strong>Assistant:</strong></p>`;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chatData += decoder.decode(value, { stream: true });
+        if (chatData.endsWith('\n')) {
+          fullResponse += parseDeltas(chatData);
+          chatData = '';
+        }
+      }
+
+      let chatHistory = JSON.parse(localStorage.getItem('chatHistory')) || [];
+      chatHistory.push({ sender: 'Assistant', message: fullResponse.trim() });
+      localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
+
+      updateChatBox();
+    }
+
+    function parseDeltas(data) {
+      const chatBox = document.getElementById('chatBox');
+      const lines = data.split('\n').filter(line => line.startsWith('data: '));
+      let responseChunk = '';
+
+      lines.forEach(line => {
+        const json = line.replace('data: ', '');
+        if (json !== '[DONE]') {
+          const parsedJson = JSON.parse(json);
+          if (parsedJson.choices && parsedJson.choices[0].delta && parsedJson.choices[0].delta.content) {
+            const content = parsedJson.choices[0].delta.content;
+            chatBox.innerHTML += content;
+            responseChunk += content;
+          }
+        }
+      });
+      chatBox.scrollTop = chatBox.scrollHeight;
+      return responseChunk;
     }
 
     function updateChatBox() {
       const chatBox = document.getElementById('chatBox');
       const chatHistory = JSON.parse(localStorage.getItem('chatHistory')) || [];
-      chatBox.innerHTML = chatHistory.map(entry => `<p><strong>${entry.sender}:</strong> ${entry.message}</p>`).join('');
+      chatBox.innerHTML = chatHistory.map(entry => `<p><strong>${entry.sender}:</strong></p> ${entry.message}`).join('');
       chatBox.scrollTop = chatBox.scrollHeight;
     }
 
     document.getElementById('connectButton').addEventListener('click', async () => {
-      const api_key = await checkAuthFlow();
-      sessionStorage.setItem('api_key');
+      let codeVerifier = generateRandomString(128);
+      sessionStorage.setItem('code_verifier', codeVerifier);
+      const callbackUrl = window.location.origin + window.location.pathname;
+      const codeChallenge = await sha256CodeChallenge(codeVerifier);
+      const authUrl = `https://openrouter.ai/auth?callback_url=${encodeURIComponent(callbackUrl)}&code_challenge=${codeChallenge}&code_challenge_method=S256`;
+      window.location.href = authUrl;
     });
 
     document.getElementById('sendButton').addEventListener('click', async () => {
@@ -80,25 +138,18 @@
         return;
       }
 
-      // Update chat history with user's message
       let chatHistory = JSON.parse(localStorage.getItem('chatHistory')) || [];
       chatHistory.push({ sender: 'You', message: userInput });
       localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
       updateChatBox();
 
-      // Create messages array for API call
       const messages = chatHistory.map(entry => {
         return { role: entry.sender === 'You' ? 'user' : 'assistant', content: entry.message };
       });
       messages.unshift({ role: 'system', content: 'You are a helpful assistant.' });
 
       try {
-        const responseMessage = await sendChatCompletion(apiKey, messages);
-        // Update chat history with assistant's response
-        chatHistory = JSON.parse(localStorage.getItem('chatHistory')) || [];
-        chatHistory.push({ sender: 'Assistant', message: responseMessage });
-        localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
-        updateChatBox();
+        await sendChatCompletion(apiKey, messages);
       } catch (error) {
         chatHistory = JSON.parse(localStorage.getItem('chatHistory')) || [];
         chatHistory.push({ sender: 'Error', message: error.message });
@@ -107,6 +158,45 @@
       }
     });
 
+    document.getElementById('clearChatButton').addEventListener('click', () => {
+      localStorage.removeItem('chatHistory');
+      updateChatBox();
+    });
+
+    (async () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const authCode = urlParams.get('code');
+      let codeVerifier = sessionStorage.getItem('code_verifier');
+
+      if (authCode) {
+        fetch('https://openrouter.ai/api/v1/auth/keys', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            code: authCode,
+            code_verifier: codeVerifier,
+            code_challenge_method: 'S256'
+          })
+        })
+        .then(response => response.json())
+        .then(data => {
+          localStorage.removeItem('chatHistory');
+          alert('API Key Received: ' + data.key);
+          sessionStorage.setItem('api_key', data.key);
+          sessionStorage.removeItem('code_verifier');
+          document.getElementById('connectButton').style.display = 'none';
+        })
+        .catch((error) => {
+          alert('Error: ' + error);
+          sessionStorage.removeItem('code_verifier');
+        });
+      }
+
+      if (sessionStorage.getItem('api_key')) {
+        document.getElementById('connectButton').style.display = 'none';
+      }
 
       updateChatBox();
     })();
